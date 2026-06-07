@@ -40,3 +40,5 @@ require (
 //replace github.com/tickstep/bolt => /Users/tickstep/Documents/Workspace/go/projects/bolt
 //replace github.com/tickstep/library-go => /Users/tickstep/Documents/Workspace/go/projects/library-go
 //replace github.com/tickstep/aliyunpan-api => /Users/tickstep/Documents/Workspace/go/projects/aliyunpan-api
+
+replace github.com/tickstep/aliyunpan-api => github.com/jupiter2021/aliyunpan-api v0.2.10-0.20260607123536-28ae17ba006f

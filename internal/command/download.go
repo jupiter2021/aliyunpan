@@ -20,7 +20,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 
+	"github.com/tickstep/aliyunpan-api/aliyunpan"
 	"github.com/tickstep/aliyunpan/cmder"
 	"github.com/tickstep/aliyunpan/cmder/cmdtable"
 	"github.com/tickstep/aliyunpan/internal/config"
@@ -72,6 +74,82 @@ var (
 	// DownloadCacheSize 默认每个线程下载缓存大小
 	DownloadCacheSize = 64 * converter.KB
 )
+
+func expandLivePhotoFileForDownload(activeUser *config.PanUser, driveId string, f *aliyunpan.FileEntity) ([]*aliyunpan.FileEntity, error) {
+	if activeUser == nil || f == nil {
+		return nil, fmt.Errorf("empty live photo file")
+	}
+	if activeUser.PanClient().WebapiPanClient() == nil {
+		return nil, fmt.Errorf("webapi client is unavailable")
+	}
+	targetDriveId := f.DriveId
+	if targetDriveId == "" {
+		targetDriveId = driveId
+	}
+	if targetDriveId == "" {
+		targetDriveId = activeUser.ActiveDriveId
+	}
+	durl, apierr := activeUser.PanClient().WebapiPanClient().GetFileDownloadUrl(&aliyunpan.GetFileDownloadUrlParam{
+		DriveId: targetDriveId,
+		FileId:  f.FileId,
+	})
+	if apierr != nil {
+		return nil, apierr
+	}
+	if durl == nil || durl.StreamsUrl == nil {
+		return nil, fmt.Errorf("missing live photo streams")
+	}
+
+	streams := durl.StreamsUrl
+	ext := filepath.Ext(f.FileName)
+	baseName := strings.TrimSuffix(f.FileName, ext)
+	basePath := strings.TrimSuffix(f.Path, filepath.Ext(f.Path))
+	result := []*aliyunpan.FileEntity{}
+
+	if streams.Heic != "" || streams.Jpeg != "" {
+		photoFile := cloneFileEntity(f)
+		photoUrl := streams.Heic
+		photoExt := "heic"
+		photoSuffix := ".HEIC"
+		if photoUrl == "" {
+			photoUrl = streams.Jpeg
+			photoExt = "jpg"
+			photoSuffix = ".JPG"
+		}
+		photoInfo := getHttpDownloadFileInfo(photoUrl)
+		if photoInfo.FileExtension != "" {
+			photoExt = photoInfo.FileExtension
+			photoSuffix = "." + strings.ToUpper(photoInfo.FileExtension)
+			if photoInfo.FileExtension == "jpg" {
+				photoSuffix = ".JPG"
+			}
+		}
+		photoFile.FileName = baseName + photoSuffix
+		photoFile.Path = basePath + photoSuffix
+		photoFile.FileExtension = photoExt
+		if photoInfo.FileSize > 0 {
+			photoFile.FileSize = photoInfo.FileSize
+		}
+		result = append(result, photoFile)
+	}
+
+	if streams.Mov != "" {
+		videoFile := cloneFileEntity(f)
+		videoInfo := getHttpDownloadFileInfo(streams.Mov)
+		videoFile.FileName = baseName + ".MOV"
+		videoFile.Path = basePath + ".MOV"
+		videoFile.FileExtension = "mov"
+		if videoInfo.FileSize > 0 {
+			videoFile.FileSize = videoInfo.FileSize
+		}
+		result = append(result, videoFile)
+	}
+
+	if len(result) == 0 {
+		return nil, fmt.Errorf("empty live photo streams")
+	}
+	return result, nil
+}
 
 func CmdDownload() cli.Command {
 	return cli.Command{
@@ -422,49 +500,80 @@ func RunDownload(paths []string, options *DownloadOptions) {
 		})
 		// 逐一下载
 		for _, f := range fileList {
-			newCfg := *cfg
-
 			// 是否排除下载
-			if utils.IsExcludeFile(f.Path, &newCfg.ExcludeNames) {
+			if utils.IsExcludeFile(f.Path, &cfg.ExcludeNames) {
 				logf("排除文件: %s\n", f.Path)
 				continue
 			}
 
-			// 匹配的文件
-			unit := pandownload.DownloadTaskUnit{
-				DownloadActionId:     options.DownloadActionId,
-				Cfg:                  &newCfg, // 复制一份新的cfg
-				PanClient:            panClient,
-				SubPanClientList:     subPanClientList,
-				VerbosePrinter:       panCommandVerbose,
-				ParentTaskExecutor:   &executor,
-				DownloadStatistic:    statistic,
-				IsPrintStatus:        options.IsPrintStatus,
-				IsExecutedPermission: options.IsExecutedPermission,
-				IsOverwrite:          options.IsOverwrite,
-				NoCheck:              options.NoCheck,
-				FilePanSource:        global.FileSource,
-				FilePanPath:          f.Path,
-				DriveId:              options.DriveId,
-				GlobalSpeedsStat:     globalSpeedsStat,
-				FileRecorder:         fileRecorder,
-				UI:                   dashboard,
+			downloadFiles := []*aliyunpan.FileEntity{f}
+			useWebApiForDownloadFiles := false
+			if strings.EqualFold(filepath.Ext(f.FileName), ".livp") {
+				if activeUser.PanClient().WebapiPanClient() == nil {
+					logf("下载实况照片需要 WebAPI 登录态，请重新执行 login 完成扫码登录: %s\n", f.Path)
+					continue
+				}
+				expandedFiles, err := expandLivePhotoFileForDownload(activeUser, options.DriveId, f)
+				if err != nil {
+					logf("获取实况照片下载流失败: %s, %s\n", f.Path, err)
+					continue
+				}
+				downloadFiles = expandedFiles
+				useWebApiForDownloadFiles = true
 			}
 
-			// 设置储存的路径
-			if options.SaveTo != "" {
-				unit.OriginSaveRootPath = options.SaveTo
-				unit.SavePath = filepath.Join(options.SaveTo, f.Path)
-			} else {
-				// 使用默认的保存路径
-				unit.OriginSaveRootPath = GetActiveUser().GetSavePath("")
-				unit.SavePath = GetActiveUser().GetSavePath(f.Path)
+			for _, downloadFile := range downloadFiles {
+				newCfg := *cfg
+				if utils.IsExcludeFile(downloadFile.Path, &newCfg.ExcludeNames) {
+					logf("排除文件: %s\n", downloadFile.Path)
+					continue
+				}
+
+				taskDriveId := options.DriveId
+				if downloadFile.DriveId != "" {
+					taskDriveId = downloadFile.DriveId
+				}
+
+				// 匹配的文件
+				unit := pandownload.DownloadTaskUnit{
+					DownloadActionId:     options.DownloadActionId,
+					Cfg:                  &newCfg, // 复制一份新的cfg
+					PanClient:            panClient,
+					SubPanClientList:     subPanClientList,
+					VerbosePrinter:       panCommandVerbose,
+					ParentTaskExecutor:   &executor,
+					DownloadStatistic:    statistic,
+					IsPrintStatus:        options.IsPrintStatus,
+					IsExecutedPermission: options.IsExecutedPermission,
+					IsOverwrite:          options.IsOverwrite,
+					NoCheck:              options.NoCheck,
+					FilePanSource:        global.FileSource,
+					FilePanPath:          downloadFile.Path,
+					DriveId:              taskDriveId,
+					UseWebApi:            useWebApiForDownloadFiles,
+					GlobalSpeedsStat:     globalSpeedsStat,
+					FileRecorder:         fileRecorder,
+					UI:                   dashboard,
+				}
+				if useWebApiForDownloadFiles {
+					unit.SetFileInfo(global.FileSource, downloadFile)
+				}
+
+				// 设置储存的路径
+				if options.SaveTo != "" {
+					unit.OriginSaveRootPath = options.SaveTo
+					unit.SavePath = filepath.Join(options.SaveTo, downloadFile.Path)
+				} else {
+					// 使用默认的保存路径
+					unit.OriginSaveRootPath = GetActiveUser().GetSavePath("")
+					unit.SavePath = GetActiveUser().GetSavePath(downloadFile.Path)
+				}
+				info := executor.Append(&unit, options.MaxRetry)
+				if dashboard != nil {
+					dashboard.RegisterTask(info.Id(), downloadFile.Path, downloadFile.FileSize, downloadFile.IsFile())
+				}
+				logf("[%s] 加入下载队列: %s\n", info.Id(), downloadFile.Path)
 			}
-			info := executor.Append(&unit, options.MaxRetry)
-			if dashboard != nil {
-				dashboard.RegisterTask(info.Id(), f.Path, f.FileSize, f.IsFile())
-			}
-			logf("[%s] 加入下载队列: %s\n", info.Id(), f.Path)
 		}
 	}
 

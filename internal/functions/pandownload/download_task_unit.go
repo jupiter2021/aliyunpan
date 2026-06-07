@@ -70,6 +70,7 @@ type (
 		SavePath           string                // 文件保存在本地的路径
 		OriginSaveRootPath string                // 文件保存在本地的根目录路径
 		DriveId            string                // 网盘ID
+		UseWebApi          bool                  // 是否使用 WebAPI 获取下载链接
 
 		fileInfo *aliyunpan.FileEntity // 文件或目录详情
 
@@ -199,6 +200,7 @@ func (dtu *DownloadTaskUnit) download() (err error) {
 	der := downloader.NewDownloader(writer, dtu.Cfg, dtu.PanClient, dtu.SubPanClientList, dtu.GlobalSpeedsStat)
 	der.SetFileInfo(dtu.FilePanSource, dtu.fileInfo)
 	der.SetDriveId(dtu.DriveId)
+	der.SetUseWebApi(dtu.UseWebApi)
 	der.SetStatusCodeBodyCheckFunc(func(respBody io.Reader) error {
 		// 解析错误
 		return apierror.NewFailedApiError("")
@@ -475,7 +477,7 @@ func (dtu *DownloadTaskUnit) Run() (result *taskframework.TaskUnitRunResult) {
 	result = &taskframework.TaskUnitRunResult{}
 	// 获取文件信息
 	var apierr *apierror.ApiError
-	if dtu.fileInfo == nil || dtu.taskInfo.Retry() > 0 {
+	if dtu.fileInfo == nil || (dtu.taskInfo.Retry() > 0 && !dtu.UseWebApi) {
 		// 没有获取文件信息
 		// 如果是动态添加的下载任务, 是会写入文件信息的
 		// 如果该任务重试过, 则应该再获取一次文件信息

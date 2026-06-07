@@ -43,6 +43,8 @@ type (
 		id               int            // work id
 		fileId           string         // 文件ID
 		driveId          string
+		fileExtension    string
+		useWebApi        bool
 		url              string // 下载地址
 		acceptRanges     string
 		panClient        *config.PanClient
@@ -86,6 +88,14 @@ func NewWorker(id int, driveId string, fileId, durl string, writerAt io.WriterAt
 // ID 返回worker ID
 func (wer *Worker) ID() int {
 	return wer.id
+}
+
+func (wer *Worker) SetFileExtension(fileExtension string) {
+	wer.fileExtension = fileExtension
+}
+
+func (wer *Worker) SetUseWebApi(useWebApi bool) {
+	wer.useWebApi = useWebApi
 }
 
 func (wer *Worker) lazyInit() {
@@ -222,13 +232,24 @@ func (wer *Worker) Reset() {
 func (wer *Worker) RefreshDownloadUrl() {
 	var apierr *apierror.ApiError
 	logger.Verbosef("get new download url for worker: %d\n", wer.ID())
-	durl, apierr := wer.panClient.OpenapiPanClient().GetFileDownloadUrl(&aliyunpan.GetFileDownloadUrlParam{DriveId: wer.driveId, FileId: wer.fileId})
+	var durl *aliyunpan.GetFileDownloadUrlResult
+	param := &aliyunpan.GetFileDownloadUrlParam{DriveId: wer.driveId, FileId: wer.fileId}
+	if wer.useWebApi && wer.panClient.WebapiPanClient() != nil {
+		durl, apierr = wer.panClient.WebapiPanClient().GetFileDownloadUrl(param)
+	} else {
+		durl, apierr = wer.panClient.OpenapiPanClient().GetFileDownloadUrl(param)
+	}
 	if apierr != nil {
 		logger.Verbosef("get new download url for worker: %d, error: %+v\n", wer.ID(), apierr)
 		wer.status.statusCode = StatusCodeTooManyConnections
 		return
 	}
-	wer.url = durl.Url
+	wer.url = selectFileDownloadUrlByExtension(durl, wer.fileExtension)
+	if wer.url == "" {
+		logger.Verbosef("get new download url for worker: %d, empty url\n", wer.ID())
+		wer.status.statusCode = StatusCodeTooManyConnections
+		return
+	}
 	logger.Verbosef("get new download url for worker: %d, new url: %s\n", wer.ID(), wer.url)
 }
 

@@ -32,12 +32,20 @@ import (
 	"github.com/tickstep/library-go/requester"
 	"github.com/tickstep/library-go/requester/rio/speeds"
 	"github.com/urfave/cli"
+	"io"
+	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
+
+type httpDownloadFileInfo struct {
+	FileSize      int64
+	FileExtension string
+}
 
 func CmdAlbum() cli.Command {
 	return cli.Command{
@@ -464,6 +472,10 @@ func cloneFileEntity(entity *aliyunpan.FileEntity) *aliyunpan.FileEntity {
 }
 
 func getHttpDownloadFileSize(fileUrl string) int64 {
+	return getHttpDownloadFileInfo(fileUrl).FileSize
+}
+
+func getHttpDownloadFileInfo(fileUrl string) httpDownloadFileInfo {
 	client := requester.NewHTTPClient()
 	client.SetKeepAlive(true)
 	client.SetTimeout(10 * time.Minute)
@@ -471,11 +483,118 @@ func getHttpDownloadFileSize(fileUrl string) int64 {
 	headers := map[string]string{
 		"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
 		"referer":    "https://www.aliyundrive.com/",
+		"range":      "bytes=0-31",
 	}
 	resp, err := client.Req("GET", fileUrl, nil, headers)
+	if err == nil && resp != nil {
+		info := httpDownloadFileInfo{FileExtension: inferHTTPDownloadFileExtension(resp)}
+		if resp.Body != nil {
+			if sniffed, readErr := io.ReadAll(io.LimitReader(resp.Body, 64)); readErr == nil {
+				if ext := inferDownloadFileExtensionFromBytes(sniffed); ext != "" {
+					info.FileExtension = ext
+				}
+			}
+			resp.Body.Close()
+		}
+		if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
+			info.FileSize = total
+			return info
+		}
+		if resp.StatusCode != http.StatusPartialContent && resp.ContentLength > 1 {
+			info.FileSize = resp.ContentLength
+			return info
+		}
+	}
+
+	delete(headers, "range")
+	resp, err = client.Req("HEAD", fileUrl, nil, headers)
+	if err != nil {
+		return httpDownloadFileInfo{FileSize: -1}
+	}
+	if resp == nil {
+		return httpDownloadFileInfo{FileSize: -1}
+	}
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	return httpDownloadFileInfo{
+		FileSize:      resp.ContentLength,
+		FileExtension: inferHTTPDownloadFileExtension(resp),
+	}
+}
+
+func parseContentRangeTotal(contentRange string) int64 {
+	if contentRange == "" {
+		return -1
+	}
+	parts := strings.Split(contentRange, "/")
+	if len(parts) != 2 || parts[1] == "*" {
+		return -1
+	}
+	total, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
 	if err != nil {
 		return -1
 	}
-	fileSize := resp.ContentLength
-	return fileSize
+	return total
+}
+
+func inferHTTPDownloadFileExtension(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil {
+		contentType = mediaType
+	}
+	switch {
+	case strings.Contains(contentType, "heic"), strings.Contains(contentType, "heif"):
+		return "heic"
+	case strings.Contains(contentType, "jpeg"), strings.Contains(contentType, "jpg"):
+		return "jpg"
+	case strings.Contains(contentType, "quicktime"):
+		return "mov"
+	}
+
+	contentDisposition := resp.Header.Get("Content-Disposition")
+	if _, params, err := mime.ParseMediaType(contentDisposition); err == nil {
+		if ext := normalizeDownloadFileExtension(filepath.Ext(params["filename"])); ext != "" {
+			return ext
+		}
+	}
+	if resp.Request != nil && resp.Request.URL != nil {
+		return normalizeDownloadFileExtension(filepath.Ext(resp.Request.URL.Path))
+	}
+	return ""
+}
+
+func inferDownloadFileExtensionFromBytes(data []byte) string {
+	if len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff {
+		return "jpg"
+	}
+	if len(data) < 12 || string(data[4:8]) != "ftyp" {
+		return ""
+	}
+	brand := string(data[8:12])
+	switch brand {
+	case "heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1":
+		return "heic"
+	case "qt  ":
+		return "mov"
+	default:
+		return ""
+	}
+}
+
+func normalizeDownloadFileExtension(ext string) string {
+	ext = strings.TrimPrefix(strings.ToLower(ext), ".")
+	switch ext {
+	case "heic", "heif":
+		return "heic"
+	case "jpg", "jpeg":
+		return "jpg"
+	case "mov":
+		return "mov"
+	default:
+		return ""
+	}
 }

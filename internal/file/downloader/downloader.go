@@ -58,6 +58,7 @@ type (
 		filePanSource           global.FileSourceType // 要下载的网盘文件来源
 		fileInfo                *aliyunpan.FileEntity // 下载的文件信息
 		driveId                 string
+		useWebApi               bool
 		loadBalancerCompareFunc LoadBalancerCompareFunc // 负载均衡检测函数
 		durlCheckFunc           DURLCheckFunc           // 下载url检测函数
 		statusCodeBodyCheckFunc StatusCodeBodyCheckFunc
@@ -84,6 +85,7 @@ type (
 		DriveId   string
 		FileId    string
 		FileUrl   string
+		UseWebApi bool
 	}
 )
 
@@ -106,6 +108,43 @@ func (der *Downloader) SetFileInfo(source global.FileSourceType, f *aliyunpan.Fi
 }
 func (der *Downloader) SetDriveId(driveId string) {
 	der.driveId = driveId
+}
+
+func (der *Downloader) SetUseWebApi(useWebApi bool) {
+	der.useWebApi = useWebApi
+}
+
+func selectFileDownloadUrlByExtension(durl *aliyunpan.GetFileDownloadUrlResult, fileExtension string) string {
+	if durl == nil {
+		return ""
+	}
+	if durl.StreamsUrl != nil {
+		ext := strings.TrimPrefix(strings.ToLower(fileExtension), ".")
+		switch ext {
+		case "mov":
+			return durl.StreamsUrl.Mov
+		case "heic":
+			if durl.StreamsUrl.Heic != "" {
+				return durl.StreamsUrl.Heic
+			}
+			return durl.StreamsUrl.Jpeg
+		case "jpg", "jpeg":
+			if durl.StreamsUrl.Jpeg != "" {
+				return durl.StreamsUrl.Jpeg
+			}
+			return durl.StreamsUrl.Heic
+		}
+	}
+	return durl.Url
+}
+
+func (der *Downloader) isAlbumDriveSource() bool {
+	activeUser := config.Config.ActiveUser()
+	if activeUser == nil {
+		return false
+	}
+	driveInfo := activeUser.GetDriveById(der.driveId)
+	return driveInfo != nil && driveInfo.IsAlbumDrive()
 }
 
 // SetClient 设置http客户端
@@ -417,6 +456,8 @@ func (der *Downloader) Execute() error {
 		worker := NewWorker(k, panClientUrl.DriveId, panClientUrl.FileInfo.FileId, realUrl, writer, der.globalSpeedsStat)
 		worker.SetClient(client)
 		worker.SetPanClient(panClientUrl.PanClient)
+		worker.SetFileExtension(panClientUrl.FileInfo.FileExtension)
+		worker.SetUseWebApi(panClientUrl.UseWebApi)
 		worker.SetWriteMutex(writeMu)
 		worker.SetTotalSize(der.fileInfo.FileSize)
 
@@ -471,6 +512,10 @@ func (der *Downloader) getFileAllClientDownloadUrl() ([]*panClientDownloadUrlEnt
 
 // getFileSourceDownloadUrl 获取文件源的文件下载链接
 func (der *Downloader) getFileSourceDownloadUrl() ([]*panClientDownloadUrlEntity, error) {
+	if (der.useWebApi || der.isAlbumDriveSource()) && der.panClient.WebapiPanClient() != nil {
+		return der.getWebFileSourceDownloadUrl()
+	}
+
 	result := []*panClientDownloadUrlEntity{}
 
 	// 主账号（必须存在）
@@ -486,7 +531,8 @@ func (der *Downloader) getFileSourceDownloadUrl() ([]*panClientDownloadUrlEntity
 		cmdutil.Trigger(der.onCancelEvent)
 		return nil, apierr
 	}
-	if durl == nil || durl.Url == "" || strings.HasPrefix(durl.Url, aliyunpan.IllegalDownloadUrlPrefix) {
+	realUrl := selectFileDownloadUrlByExtension(durl, der.fileInfo.FileExtension)
+	if realUrl == "" || strings.HasPrefix(realUrl, aliyunpan.IllegalDownloadUrlPrefix) {
 		logger.Verbosef("无法获取有效的下载链接: %+v\n", durl)
 		cmdutil.Trigger(der.onCancelEvent)
 		der.removeInstanceState() // 移除断点续传文件
@@ -498,7 +544,7 @@ func (der *Downloader) getFileSourceDownloadUrl() ([]*panClientDownloadUrlEntity
 		FileInfo:  der.fileInfo,
 		DriveId:   der.driveId,
 		FileId:    der.fileInfo.FileId,
-		FileUrl:   durl.Url,
+		FileUrl:   realUrl,
 	})
 
 	// 网盘名称
@@ -546,7 +592,8 @@ func (der *Downloader) getFileSourceDownloadUrl() ([]*panClientDownloadUrlEntity
 				logger.Verbosef("ERROR: get download url error: %s\n", der.fileInfo.FileId)
 				continue
 			}
-			if durl2 == nil || durl2.Url == "" || strings.HasPrefix(durl2.Url, aliyunpan.IllegalDownloadUrlPrefix) {
+			realUrl2 := selectFileDownloadUrlByExtension(durl2, panfileInfo.FileExtension)
+			if realUrl2 == "" || strings.HasPrefix(realUrl2, aliyunpan.IllegalDownloadUrlPrefix) {
 				logger.Verbosef("无法获取有效的下载链接: %+v\n", durl2)
 				continue
 			}
@@ -555,12 +602,43 @@ func (der *Downloader) getFileSourceDownloadUrl() ([]*panClientDownloadUrlEntity
 				FileInfo:  panfileInfo,
 				DriveId:   driveId,
 				FileId:    panfileInfo.FileId,
-				FileUrl:   durl2.Url,
+				FileUrl:   realUrl2,
 			})
 		}
 	}
 
 	return result, nil
+}
+
+func (der *Downloader) getWebFileSourceDownloadUrl() ([]*panClientDownloadUrlEntity, error) {
+	durl, apierr := der.panClient.WebapiPanClient().GetFileDownloadUrl(&aliyunpan.GetFileDownloadUrlParam{
+		DriveId: der.driveId,
+		FileId:  der.fileInfo.FileId,
+	})
+	time.Sleep(time.Duration(200) * time.Millisecond)
+	if apierr != nil {
+		logger.Verbosef("ERROR: get web download url error: %s\n", der.fileInfo.FileId)
+		cmdutil.Trigger(der.onCancelEvent)
+		return nil, apierr
+	}
+
+	realUrl := selectFileDownloadUrlByExtension(durl, der.fileInfo.FileExtension)
+	if realUrl == "" || strings.HasPrefix(realUrl, aliyunpan.IllegalDownloadUrlPrefix) {
+		logger.Verbosef("无法获取有效的Web下载链接: %+v\n", durl)
+		cmdutil.Trigger(der.onCancelEvent)
+		der.removeInstanceState()
+		cmdutil.Trigger(der.onFailedEvent)
+		return nil, ErrFileDownloadForbidden
+	}
+
+	return []*panClientDownloadUrlEntity{{
+		PanClient: der.panClient,
+		FileInfo:  der.fileInfo,
+		DriveId:   der.driveId,
+		FileId:    der.fileInfo.FileId,
+		FileUrl:   realUrl,
+		UseWebApi: true,
+	}}, nil
 }
 
 // getAlbumSourceDownloadUrl 获取相册源的文件下载链接

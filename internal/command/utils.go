@@ -75,7 +75,18 @@ func RunTestShellPattern(driveId string, pattern string) {
 func matchPathByShellPattern(driveId string, patterns ...string) (files []*aliyunpan.FileEntity, e error) {
 	acUser := GetActiveUser()
 	for k := range patterns {
-		ps, err := acUser.PanClient().OpenapiPanClient().MatchPathByShellPattern(driveId, acUser.PathJoin(driveId, patterns[k]))
+		panPath := acUser.PathJoin(driveId, patterns[k])
+		if !strings.ContainsAny(panPath, aliyunpan.ShellPatternCharacters) {
+			file, err := acUser.PanClient().OpenapiPanClient().FileInfoByPath(driveId, panPath)
+			if err != nil {
+				return nil, err
+			}
+			if file != nil {
+				files = append(files, file)
+			}
+			continue
+		}
+		ps, err := acUser.PanClient().OpenapiPanClient().MatchPathByShellPattern(driveId, panPath)
 		if err != nil {
 			return nil, err
 		}

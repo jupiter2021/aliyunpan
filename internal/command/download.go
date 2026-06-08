@@ -105,9 +105,12 @@ func expandLivePhotoFileForDownload(activeUser *config.PanUser, driveId string, 
 	baseName := strings.TrimSuffix(f.FileName, ext)
 	basePath := strings.TrimSuffix(f.Path, filepath.Ext(f.Path))
 	result := []*aliyunpan.FileEntity{}
+	var photoFile *aliyunpan.FileEntity
+	var videoFile *aliyunpan.FileEntity
+	var photoInfo httpDownloadFileInfo
+	var videoInfo httpDownloadFileInfo
 
 	if streams.Heic != "" || streams.Jpeg != "" {
-		photoFile := cloneFileEntity(f)
 		photoUrl := streams.Heic
 		photoExt := "heic"
 		photoSuffix := ".HEIC"
@@ -116,7 +119,7 @@ func expandLivePhotoFileForDownload(activeUser *config.PanUser, driveId string, 
 			photoExt = "jpg"
 			photoSuffix = ".JPG"
 		}
-		photoInfo := getHttpDownloadFileInfo(photoUrl)
+		photoInfo = getHttpDownloadFileInfo(photoUrl)
 		if photoInfo.FileExtension != "" {
 			photoExt = photoInfo.FileExtension
 			photoSuffix = "." + strings.ToUpper(photoInfo.FileExtension)
@@ -124,9 +127,23 @@ func expandLivePhotoFileForDownload(activeUser *config.PanUser, driveId string, 
 				photoSuffix = ".JPG"
 			}
 		}
+		photoFile = cloneFileEntity(f)
 		photoFile.FileName = baseName + photoSuffix
 		photoFile.Path = basePath + photoSuffix
 		photoFile.FileExtension = photoExt
+	}
+
+	if streams.Mov != "" {
+		videoInfo = getHttpDownloadFileInfo(streams.Mov)
+		videoFile = cloneFileEntity(f)
+		videoFile.FileName = baseName + ".MOV"
+		videoFile.Path = basePath + ".MOV"
+		videoFile.FileExtension = "mov"
+	}
+
+	fillMissingLivePhotoStreamSizes(f.FileSize, &photoInfo, &videoInfo)
+
+	if photoFile != nil {
 		if photoInfo.FileSize <= 0 {
 			return nil, fmt.Errorf("missing live photo still stream size: %s", f.Path)
 		}
@@ -134,12 +151,7 @@ func expandLivePhotoFileForDownload(activeUser *config.PanUser, driveId string, 
 		result = append(result, photoFile)
 	}
 
-	if streams.Mov != "" {
-		videoFile := cloneFileEntity(f)
-		videoInfo := getHttpDownloadFileInfo(streams.Mov)
-		videoFile.FileName = baseName + ".MOV"
-		videoFile.Path = basePath + ".MOV"
-		videoFile.FileExtension = "mov"
+	if videoFile != nil {
 		if videoInfo.FileSize <= 0 {
 			return nil, fmt.Errorf("missing live photo video stream size: %s", f.Path)
 		}
@@ -151,6 +163,18 @@ func expandLivePhotoFileForDownload(activeUser *config.PanUser, driveId string, 
 		return nil, fmt.Errorf("empty live photo streams")
 	}
 	return result, nil
+}
+
+func fillMissingLivePhotoStreamSizes(containerSize int64, photoInfo, videoInfo *httpDownloadFileInfo) {
+	if containerSize <= 0 || photoInfo == nil || videoInfo == nil {
+		return
+	}
+	if photoInfo.FileSize <= 0 && videoInfo.FileSize > 0 && containerSize > videoInfo.FileSize {
+		photoInfo.FileSize = containerSize - videoInfo.FileSize
+	}
+	if videoInfo.FileSize <= 0 && photoInfo.FileSize > 0 && containerSize > photoInfo.FileSize {
+		videoInfo.FileSize = containerSize - photoInfo.FileSize
+	}
 }
 
 func CmdDownload() cli.Command {

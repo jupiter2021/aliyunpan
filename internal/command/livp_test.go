@@ -94,3 +94,17 @@ func TestGetHTTPDownloadFileInfoIgnoresErrorContentRange(t *testing.T) {
 		t.Fatalf("got extension %q, want mov", info.FileExtension)
 	}
 }
+
+func TestFillMissingLivePhotoStreamSizes(t *testing.T) {
+	photoInfo := httpDownloadFileInfo{}
+	videoInfo := httpDownloadFileInfo{FileSize: 3_128_969}
+
+	fillMissingLivePhotoStreamSizes(4_069_117, &photoInfo, &videoInfo)
+
+	if photoInfo.FileSize != 940_148 {
+		t.Fatalf("got photo size %d, want 940148", photoInfo.FileSize)
+	}
+	if videoInfo.FileSize != 3_128_969 {
+		t.Fatalf("got video size %d, want 3128969", videoInfo.FileSize)
+	}
+}

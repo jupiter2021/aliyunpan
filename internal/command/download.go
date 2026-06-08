@@ -127,9 +127,10 @@ func expandLivePhotoFileForDownload(activeUser *config.PanUser, driveId string, 
 		photoFile.FileName = baseName + photoSuffix
 		photoFile.Path = basePath + photoSuffix
 		photoFile.FileExtension = photoExt
-		if photoInfo.FileSize > 0 {
-			photoFile.FileSize = photoInfo.FileSize
+		if photoInfo.FileSize <= 0 {
+			return nil, fmt.Errorf("missing live photo still stream size: %s", f.Path)
 		}
+		photoFile.FileSize = photoInfo.FileSize
 		result = append(result, photoFile)
 	}
 
@@ -139,9 +140,10 @@ func expandLivePhotoFileForDownload(activeUser *config.PanUser, driveId string, 
 		videoFile.FileName = baseName + ".MOV"
 		videoFile.Path = basePath + ".MOV"
 		videoFile.FileExtension = "mov"
-		if videoInfo.FileSize > 0 {
-			videoFile.FileSize = videoInfo.FileSize
+		if videoInfo.FileSize <= 0 {
+			return nil, fmt.Errorf("missing live photo video stream size: %s", f.Path)
 		}
+		videoFile.FileSize = videoInfo.FileSize
 		result = append(result, videoFile)
 	}
 

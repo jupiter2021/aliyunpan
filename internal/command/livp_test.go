@@ -2,6 +2,7 @@ package command
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -64,5 +65,32 @@ func TestInferDownloadFileExtensionFromBytes(t *testing.T) {
 		if got := inferDownloadFileExtensionFromBytes(tt.data); got != tt.want {
 			t.Fatalf("%s: got %q, want %q", name, got, tt.want)
 		}
+	}
+}
+
+func TestGetHTTPDownloadFileInfoIgnoresErrorContentRange(t *testing.T) {
+	const movSize = int64(3128969)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Range", "bytes */298")
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			_, _ = w.Write([]byte("range error"))
+		case http.MethodHead:
+			w.Header().Set("Content-Type", "video/quicktime")
+			w.Header().Set("Content-Length", "3128969")
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	info := getHttpDownloadFileInfo(server.URL)
+	if info.FileSize != movSize {
+		t.Fatalf("got size %d, want %d", info.FileSize, movSize)
+	}
+	if info.FileExtension != "mov" {
+		t.Fatalf("got extension %q, want mov", info.FileExtension)
 	}
 }

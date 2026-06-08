@@ -496,11 +496,13 @@ func getHttpDownloadFileInfo(fileUrl string) httpDownloadFileInfo {
 			}
 			resp.Body.Close()
 		}
-		if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
-			info.FileSize = total
-			return info
+		if resp.StatusCode == http.StatusPartialContent {
+			if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
+				info.FileSize = total
+				return info
+			}
 		}
-		if resp.StatusCode != http.StatusPartialContent && resp.ContentLength > 1 {
+		if resp.StatusCode/100 == 2 && resp.StatusCode != http.StatusPartialContent && resp.ContentLength > 1 {
 			info.FileSize = resp.ContentLength
 			return info
 		}
@@ -516,6 +518,9 @@ func getHttpDownloadFileInfo(fileUrl string) httpDownloadFileInfo {
 	}
 	if resp.Body != nil {
 		defer resp.Body.Close()
+	}
+	if resp.StatusCode/100 != 2 {
+		return httpDownloadFileInfo{FileSize: -1}
 	}
 	return httpDownloadFileInfo{
 		FileSize:      resp.ContentLength,
